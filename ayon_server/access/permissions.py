@@ -1,0 +1,216 @@
+from typing import Any
+
+from pydantic import validator
+
+from ayon_server.lib.postgres import Postgres
+from ayon_server.settings import BaseSettingsModel, SettingsField
+from ayon_server.utils import json_dumps
+
+
+def get_folder_access_types():
+    return [
+        {"value": "assigned", "label": "Assigned"},
+        {"value": "hierarchy", "label": "Hierarchy"},
+        {"value": "children", "label": "Children"},
+    ]
+
+
+async def attr_enum():
+    return [
+        row["name"]
+        async for row in Postgres.iterate("SELECT name FROM public.attributes")
+    ]
+
+
+class FolderAccess(BaseSettingsModel):
+    """FolderAccess model defines a single whitelist item on accessing a folder."""
+
+    _layout = "compact"
+
+    access_type: str = SettingsField(
+        "assigned",
+        title="Type",
+        enum_resolver=get_folder_access_types,
+    )
+
+    path: str | None = SettingsField(
+        "",
+        title="Path",
+        description="The path of the folder to allow access to. "
+        "Required for access_type 'hierarchy and 'children'",
+        example="/assets/characters",
+        widget="hierarchy",
+    )
+
+    def __hash__(self):
+        return hash(json_dumps(self.dict()))
+
+    @validator("path")
+    def validate_path(cls, value, values):
+        # Do not store path if the access_type does not support it
+        if values["access_type"] not in ["hierarchy", "children"]:
+            return None
+        # We display path WITH a leading slash
+        # access control filters remove it when conditions are evaluated
+        # but in the access list we want to have it
+        value = "/" + value.strip("/")
+        return value
+
+
+class BasePermissionsModel(BaseSettingsModel):
+    _isGroup = True
+    enabled: bool = SettingsField(False)
+
+
+class FolderAccessList(BasePermissionsModel):
+    access_list: list[FolderAccess] = SettingsField(
+        default_factory=list, layout="compact"
+    )
+
+
+class AttributeAccessList(BasePermissionsModel):
+    attributes: list[str] = SettingsField(
+        default_factory=list,
+        enum_resolver=attr_enum,
+    )
+
+
+class EndpointsAccessList(BasePermissionsModel):
+    endpoints: list[str] = SettingsField(default_factory=list)
+
+
+# Model for studio management permissions
+
+
+class StudioManagementPermissions(BaseSettingsModel):
+    create_projects: bool = SettingsField(
+        False,
+        title="Create projects",
+        description="Allow users to create new projects",
+        scope=["studio"],
+        widget="permission",
+    )
+
+    list_all_users: bool = SettingsField(
+        False,
+        title="List all users",
+        description="Allow users to list all users in the studio",
+        scope=["studio"],
+        widget="permission",
+    )
+
+    # For future use, if needed
+
+    # list_all_projects: bool = SettingsField(
+    #     False,
+    #     title="List all projects",
+    #     scope=["studio"],
+    #     widget="permission",
+    # )
+
+
+# Model for Project management permissions
+
+
+class ProjectManagementPermissions(BaseSettingsModel):
+    anatomy: int = SettingsField(
+        0,
+        title="Project anatomy",
+        description="Allow users to view or edit the project anatomy",
+        widget="permission",
+    )
+    access: int = SettingsField(
+        0,
+        title="Project access",
+        description="Allow users to view or assign users to project access groups",
+        widget="permission",
+    )
+    settings: int = SettingsField(
+        0,
+        title="Project addon settings",
+        description="Allow users to view or edit the project addon settings",
+        widget="permission",
+    )
+
+
+# Full permissions model, we separate project and studio permissions here
+# To be able to return just the relevant part of the permissions to the client
+# But the model used to store all the permissions is the combined one
+
+
+class StudioPermissions(BaseSettingsModel):
+    studio: StudioManagementPermissions = SettingsField(
+        default_factory=StudioManagementPermissions,
+        title="Studio permissions",
+        scope=["studio"],
+    )
+
+
+class ProjectPermissions(BaseSettingsModel):
+    project: ProjectManagementPermissions = SettingsField(
+        default_factory=ProjectManagementPermissions,
+        title="Project permissions",
+        scope=["studio", "project"],
+    )
+
+    create: FolderAccessList = SettingsField(
+        default_factory=FolderAccessList,
+        title="Restrict folder creation",
+        description="Whitelist folders a user can create",
+    )
+
+    read: FolderAccessList = SettingsField(
+        default_factory=FolderAccessList,
+        title="Restrict folder read",
+        description="Whitelist folders a user can read",
+    )
+
+    update: FolderAccessList = SettingsField(
+        default_factory=FolderAccessList,
+        title="Restrict folder update",
+        description="Whitelist folders a user can update",
+    )
+
+    publish: FolderAccessList = SettingsField(
+        default_factory=FolderAccessList,
+        title="Restrict publishing",
+        description="Whitelist folders a user can publish to",
+    )
+
+    delete: FolderAccessList = SettingsField(
+        default_factory=FolderAccessList,
+        title="Restrict folder delete",
+        description="Whitelist folders a user can delete",
+    )
+
+    attrib_read: AttributeAccessList = SettingsField(
+        default_factory=AttributeAccessList,
+        title="Restrict attribute read",
+        description="Whitelist attributes a user can read",
+    )
+
+    attrib_write: AttributeAccessList = SettingsField(
+        default_factory=AttributeAccessList,
+        title="Restrict attribute update",
+        description="Whitelist attributes a user can write",
+    )
+
+    endpoints: EndpointsAccessList = SettingsField(
+        default_factory=EndpointsAccessList,
+        title="Restrict REST endpoints",
+        description="Whitelist REST endpoints a user can access",
+    )
+
+
+class Permissions(ProjectPermissions, StudioPermissions):
+    """
+    The Permissions model defines the permissions for an access group.
+    to interact with specific resources in the system.
+    """
+
+    _layout = "root"
+
+    @classmethod
+    def from_record(cls, perm_dict: dict[str, Any]) -> "Permissions":
+        """Recreate a permission object from a JSON object."""
+        return cls(**perm_dict)
